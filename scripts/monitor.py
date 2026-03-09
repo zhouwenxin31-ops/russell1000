@@ -99,34 +99,45 @@ def get_tickers():
     return list(dict.fromkeys(FALLBACK))
 
 # ── 批量拉行情 ────────────────────────────────────────────────
+def _dl(chunk, period, interval):
+    return yf.download(chunk, period=period, interval=interval,
+                       group_by="ticker", auto_adjust=True,
+                       progress=False, threads=True)
+
+def _parse_chunk(raw, chunk, vol_sum=False):
+    result = []
+    for t in chunk:
+        try:
+            cl = raw["Close"][t].dropna() if len(chunk)>1 else raw["Close"].dropna()
+            vo = raw["Volume"][t].dropna() if len(chunk)>1 else raw["Volume"].dropna()
+            if len(cl) < 2: continue
+            p0, p1 = float(cl.iloc[0 if vol_sum else -2]), float(cl.iloc[-1])
+            if p0 == 0 or p1 == 0: continue
+            vol = int(vo.sum()) if vol_sum else (int(vo.iloc[-1]) if len(vo) else 0)
+            result.append({"ticker":t,"price":round(p1,2),"prev":round(p0,2),
+                           "chg":round((p1-p0)/p0*100,2),"vol":vol})
+        except: pass
+    return result
+
 def fetch_perf(tickers, batch=150):
     print(f"\n📊 下载行情 ({len(tickers)} 只)...")
     out = []
     groups = [tickers[i:i+batch] for i in range(0, len(tickers), batch)]
     for gi, chunk in enumerate(groups):
+        added = []
         try:
-            raw = yf.download(chunk, period="5d", interval="1d",
-                              group_by="ticker", auto_adjust=True,
-                              progress=False, threads=True)
-            for t in chunk:
-                try:
-                    cl = raw["Close"][t].dropna() if len(chunk)>1 else raw["Close"].dropna()
-                    vo = raw["Volume"][t].dropna() if len(chunk)>1 else raw["Volume"].dropna()
-                    if len(cl) < 2: continue
-                    p0, p1 = float(cl.iloc[-2]), float(cl.iloc[-1])
-                    if p0 == 0: continue
-                    out.append({
-                        "ticker": t,
-                        "price": round(p1, 2),
-                        "prev":  round(p0, 2),
-                        "chg":   round((p1-p0)/p0*100, 2),
-                        "vol":   int(vo.iloc[-1]) if len(vo) else 0,
-                    })
-                except: pass
+            added = _parse_chunk(_dl(chunk, "5d", "1d"), chunk)
         except Exception as e:
-            print(f"  ⚠️ batch {gi+1} 失败: {e}")
+            print(f"    ⚠️ 日线失败: {e}")
+        if not added:
+            try:
+                added = _parse_chunk(_dl(chunk, "1d", "30m"), chunk, vol_sum=True)
+                if added: print(f"    ℹ️ 使用盘中数据 (batch {gi+1})")
+            except Exception as e:
+                print(f"    ⚠️ 日内失败: {e}")
+        out.extend(added)
         print(f"  batch {gi+1}/{len(groups)} 完成 → 累计 {len(out)} 只")
-        time.sleep(0.4)
+        time.sleep(0.5)
     return out
 
 
@@ -700,9 +711,15 @@ def main():
 
     # 2. 行情
     perf = fetch_perf(tickers)
+    if not perf:
+        print("❌ 未能获取任何行情数据，退出。")
+        return
     perf.sort(key=lambda x: x["chg"], reverse=True)
     gainers_raw = perf[:TOP_N]
     losers_raw  = list(reversed(perf[-TOP_N:]))
+    if not gainers_raw or not losers_raw:
+        print("❌ 数据不足，退出。")
+        return
     print(f"\n  涨幅榜: {gainers_raw[0]['ticker']} +{gainers_raw[0]['chg']}%  "
           f"跌幅榜: {losers_raw[0]['ticker']} {losers_raw[0]['chg']}%")
 
